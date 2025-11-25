@@ -13,6 +13,7 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.5
 )
 
+
 cap = cv2.VideoCapture(0)
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
@@ -104,7 +105,7 @@ def project_gaze_to_screen(gaze_vector, rotation_vec, distance, frame_w, frame_h
     scale_factor = distance / monitor_distance
     
     sensitivity_x = 10.5
-    sensitivity_y = 12.5
+    sensitivity_y = 20.5
     
     screen_x = screen_w / 2 + gaze_world[0] * screen_w * sensitivity_x * scale_factor
     screen_y = (screen_h / 2 + gaze_world[1] * screen_h * sensitivity_y * scale_factor)
