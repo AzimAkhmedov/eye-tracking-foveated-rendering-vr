@@ -7,15 +7,15 @@ import asyncio
 import websockets
 from threading import Thread
 import time
-import os
 import socket
+
 
 screen_w, screen_h = pyautogui.size()
 
-WS_HOST = os.environ.get("GAZE_WS_HOST", "0.0.0.0")
-WS_PORT = int(os.environ.get("GAZE_WS_PORT", "8765"))
+WS_HOST = "localhost"  # Listen on all interfaces
+WS_PORT = 8765
 
-print(f"WebSocket target host: {WS_HOST}:{WS_PORT}")
+print(f"WebSocket target port: {WS_PORT}")
 
 def get_local_ip_addresses():
     """Collect available IPv4 addresses for user instructions."""
@@ -42,28 +42,51 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.5
 )
 
-
 cap = cv2.VideoCapture(0)
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
-NOSE_TIP = 1
-LEFT_EYE_CORNER = 33
-RIGHT_EYE_CORNER = 263
 
 smooth_x, smooth_y = screen_w // 2, screen_h // 2
-alpha = 0.2  
+alpha = 0.15  # Increased smoothing (lower = smoother)
+
+# Kalman filter for gaze smoothing
+class KalmanFilter:
+    def __init__(self, process_variance=1e-3, measurement_variance=1e-1):
+        self.process_variance = process_variance
+        self.measurement_variance = measurement_variance
+        self.estimated_x = screen_w // 2
+        self.estimated_y = screen_h // 2
+        self.error_cov_x = 1.0
+        self.error_cov_y = 1.0
+    
+    def update(self, measurement_x, measurement_y):
+        # Prediction
+        prediction_x = self.estimated_x
+        prediction_y = self.estimated_y
+        error_cov_x = self.error_cov_x + self.process_variance
+        error_cov_y = self.error_cov_y + self.process_variance
+        
+        # Update
+        kalman_gain_x = error_cov_x / (error_cov_x + self.measurement_variance)
+        kalman_gain_y = error_cov_y / (error_cov_y + self.measurement_variance)
+        
+        self.estimated_x = prediction_x + kalman_gain_x * (measurement_x - prediction_x)
+        self.estimated_y = prediction_y + kalman_gain_y * (measurement_y - prediction_y)
+        
+        self.error_cov_x = (1 - kalman_gain_x) * error_cov_x
+        self.error_cov_y = (1 - kalman_gain_y) * error_cov_y
+        
+        return int(self.estimated_x), int(self.estimated_y)
+
+kalman_filter = KalmanFilter(process_variance=1e-4, measurement_variance=5e-2)  
 
 dot_window = np.zeros((screen_h, screen_w, 3), dtype=np.uint8)
 cv2.namedWindow('Gaze Pointer', cv2.WINDOW_NORMAL)
 cv2.setWindowProperty('Gaze Pointer', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 cv2.setWindowProperty('Gaze Pointer', cv2.WND_PROP_TOPMOST, 1)
-
-calibration_points = []
-calibration_mode = False
-calibration_target = None
 
 # Auto-calibration at startup
 calibration_active = True
@@ -73,23 +96,22 @@ calibration_samples = []  # Store gaze_world samples during calibration
 gaze_vector_offset = np.array([0.0, 0.0, 0.0])  # Offset to apply after calibration
 
 def estimate_head_pose(landmarks, frame_w, frame_h):
-    
     model_points = np.array([
-        (0.0, 0.0, 0.0),             # Кончик носа
-        (0.0, -330.0, -65.0),        # Подбородок
-        (-225.0, 170.0, -135.0),     # Левый угол глаза
-        (225.0, 170.0, -135.0),      # Правый угол глаза
-        (-150.0, -150.0, -125.0),    # Левый угол рта
-        (150.0, -150.0, -125.0)      # Правый угол рта
+        (0.0, 0.0, 0.0),             # Nose tip
+        (0.0, -330.0, -65.0),        # Chin
+        (-225.0, 170.0, -135.0),     # Left eye corner
+        (225.0, 170.0, -135.0),      # Right eye corner
+        (-150.0, -150.0, -125.0),    # Left mouth corner
+        (150.0, -150.0, -125.0)      # Right mouth corner
     ], dtype=np.float64)
     
     image_points = np.array([
-        (landmarks[1].x * frame_w, landmarks[1].y * frame_h),      # Нос
-        (landmarks[152].x * frame_w, landmarks[152].y * frame_h),  # Подбородок
-        (landmarks[33].x * frame_w, landmarks[33].y * frame_h),    # Левый глаз
-        (landmarks[263].x * frame_w, landmarks[263].y * frame_h),  # Правый глаз
-        (landmarks[61].x * frame_w, landmarks[61].y * frame_h),    # Левый рот
-        (landmarks[291].x * frame_w, landmarks[291].y * frame_h)   # Правый рот
+        (landmarks[1].x * frame_w, landmarks[1].y * frame_h),      # Nose
+        (landmarks[152].x * frame_w, landmarks[152].y * frame_h),  # Chin
+        (landmarks[33].x * frame_w, landmarks[33].y * frame_h),    # Left eye
+        (landmarks[263].x * frame_w, landmarks[263].y * frame_h),  # Right eye
+        (landmarks[61].x * frame_w, landmarks[61].y * frame_h),    # Left mouth
+        (landmarks[291].x * frame_w, landmarks[291].y * frame_h)   # Right mouth
     ], dtype=np.float64)
     
     focal_length = frame_w
@@ -144,11 +166,10 @@ def project_gaze_to_screen(gaze_vector, rotation_vec, distance, frame_w, frame_h
     monitor_distance = 0.6  
     scale_factor = distance / monitor_distance
     
-    # Base sensitivities - Y-axis needs higher base sensitivity for vertical movement
+    # Base sensitivities
     base_sensitivity_x = 25.5
-    base_sensitivity_y = 50.0  # Increased from 20.5 for better Y-axis responsiveness
+    base_sensitivity_y = 50.0  # Y-axis
     
-    # Apply user-adjustable multiplier
     sensitivity_x = base_sensitivity_x * sensitivity_multiplier
     sensitivity_y = base_sensitivity_y * sensitivity_multiplier
     
@@ -182,9 +203,8 @@ print("=" * 60)
 print("Eye Gaze Tracker - 3D Отслеживание взгляда")
 print("=" * 60)
 print(f"Размер экрана: {screen_w}x{screen_h}")
-print(f"WebSocket target host: {WS_HOST}:{WS_PORT}")
 accessible_urls = ", ".join([f"ws://{ip}:{WS_PORT}" for ip in get_local_ip_addresses()])
-print(f"Connect render module to one of: {accessible_urls}")
+print(f"WebSocket URLs: {accessible_urls}")
 print("\n=== CALIBRATION PHASE ===")
 print("Please look at the CENTER of the screen for 5 seconds...")
 print("The red dot will be locked to center during calibration.")
@@ -197,19 +217,28 @@ print("- Нажмите 'c' для повторной калибровки це�
 print("- Нажмите '+/-' для изменения чувствительности")
 print("=" * 60)
 
-# Initialize calibration
 calibration_start_time = time.time()
 calibration_samples = []
 
 offset_x, offset_y = 0, 0
 sensitivity_multiplier = 1.0
 
-# WebSocket server for gaze data broadcasting
+# WebSocket server
 gaze_data_clients = set()
-gaze_data_queue = []
 websocket_server_ready = False
 
-async def register_client(websocket, path):
+# Latest gaze data to send
+latest_gaze_data = {
+    "x": 0.5,
+    "y": 0.5,
+    "screenX": screen_w // 2,
+    "screenY": screen_h // 2,
+    "confidence": 0.0,
+    "distance": 0.0,
+    "timestamp": 0.0
+}
+
+async def register_client(websocket):
     gaze_data_clients.add(websocket)
     print(f"[✓] WebSocket client connected. Total clients: {len(gaze_data_clients)}")
     try:
@@ -219,66 +248,59 @@ async def register_client(websocket, path):
         print(f"[!] WebSocket client disconnected. Remaining clients: {len(gaze_data_clients)}")
 
 async def broadcast_gaze_data():
+    """Continuously broadcast the latest gaze data to all connected clients"""
     while True:
-        if gaze_data_queue and gaze_data_clients:
-            data = gaze_data_queue.pop(0)
-            message = json.dumps(data)
+        if gaze_data_clients:
+            message = json.dumps(latest_gaze_data)
             disconnected = set()
             for client in gaze_data_clients:
                 try:
                     await client.send(message)
                 except websockets.exceptions.ConnectionClosed:
                     disconnected.add(client)
-            gaze_data_clients -= disconnected
-        await asyncio.sleep(0.01)  # ~100 FPS
+                except Exception as e:
+                    print(f"[!] Error sending to client: {e}")
+                    disconnected.add(client)
+            gaze_data_clients.difference_update(disconnected)
+        await asyncio.sleep(0.016)  # ~60fps
+
+async def run_server():
+    global websocket_server_ready
+    try:
+        async with websockets.serve(register_client, WS_HOST, WS_PORT):
+            websocket_server_ready = True
+            print(f"[✓] WebSocket server listening on port {WS_PORT}")
+            for ip in get_local_ip_addresses():
+                print(f"    • ws://{ip}:{WS_PORT}")
+            await broadcast_gaze_data()
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(f"[!] WebSocket port {WS_PORT} is already in use. Is another instance running?")
+        else:
+            print(f"[!] WebSocket server error: {e}")
+        websocket_server_ready = False
+    except Exception as e:
+        print(f"[!] WebSocket server error: {e}")
+        websocket_server_ready = False
 
 def start_websocket_server():
-    global websocket_server_ready
+    """Start WebSocket server in a separate thread"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    async def run_server():
-        global websocket_server_ready
-        try:
-            async with websockets.serve(register_client, WS_HOST, WS_PORT):
-                websocket_server_ready = True
-                if WS_HOST == "0.0.0.0":
-                    print(f"[✓] WebSocket server listening on all interfaces (port {WS_PORT})")
-                    print("    Reachable URLs:")
-                    for ip in get_local_ip_addresses():
-                        print(f"    • ws://{ip}:{WS_PORT}")
-                else:
-                    print(f"[✓] WebSocket server listening on ws://{WS_HOST}:{WS_PORT}")
-                # Run broadcast loop concurrently with server
-                await broadcast_gaze_data()
-        except OSError as e:
-            if "Address already in use" in str(e):
-                print(f"[!] WebSocket port {WS_PORT} is already in use. Is another instance running?")
-            else:
-                print(f"[!] WebSocket server error: {e}")
-            websocket_server_ready = False
-        except Exception as e:
-            print(f"[!] WebSocket server error: {e}")
-            websocket_server_ready = False
-    
     try:
         loop.run_until_complete(run_server())
     except Exception as e:
         print(f"[!] Failed to start WebSocket server: {e}")
-        websocket_server_ready = False
 
 # Start WebSocket server in background thread
 ws_thread = Thread(target=start_websocket_server, daemon=True)
 ws_thread.start()
 
-# Give server a moment to start
-time.sleep(1.0)  # Increased wait time for server to initialize
+time.sleep(1.0)
 if websocket_server_ready:
     print("[✓] WebSocket server is ready and accepting connections")
 else:
     print("[!] WebSocket server may not be ready yet.")
-    print("    This is normal if starting for the first time.")
-    print("    The server will be ready shortly...")
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -292,28 +314,17 @@ while cap.isOpened():
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(rgb_frame)
     
-    # Check calibration status
     current_time = time.time()
     if calibration_active:
         elapsed = current_time - calibration_start_time
         remaining = calibration_duration - elapsed
-        
-        if remaining > 0:
-            # Still calibrating - show countdown and lock gaze to center
-            calibration_in_progress = True
-        else:
-            # Calibration complete
+        calibration_in_progress = remaining > 0
+        if not calibration_in_progress:
             calibration_active = False
             if len(calibration_samples) > 0:
-                # Calculate average gaze_world offset when looking at center
                 samples_array = np.array(calibration_samples)
                 gaze_vector_offset = np.mean(samples_array, axis=0)
-                print(f"\n[✓] Calibration complete!")
-                print(f"    Collected {len(calibration_samples)} samples")
-                print(f"    Gaze offset: X={gaze_vector_offset[0]:.4f}, Y={gaze_vector_offset[1]:.4f}, Z={gaze_vector_offset[2]:.4f}")
-                print(f"    You can now move your gaze around!\n")
-            else:
-                print("\n[!] Calibration failed - no samples collected. Using default offset.\n")
+                print(f"\n[✓] Calibration complete! Gaze offset: {gaze_vector_offset}")
             calibration_in_progress = False
     else:
         calibration_in_progress = False
@@ -321,80 +332,56 @@ while cap.isOpened():
     if results.multi_face_landmarks:
         face_landmarks = results.multi_face_landmarks[0]
         landmarks = face_landmarks.landmark
-        
         try:
             gaze_vector, rotation_vec, distance = calculate_gaze_direction(landmarks, frame_w, frame_h)
-            
-            # Calculate gaze_world for debug display
             rotation_mat, _ = cv2.Rodrigues(rotation_vec)
             gaze_world = rotation_mat @ gaze_vector
             
-            # During calibration, collect samples and lock gaze to center
             if calibration_in_progress:
-                # Collect calibration sample
                 calibration_samples.append(gaze_world.copy())
-                
-                # Lock gaze to center during calibration
                 smooth_x = screen_w // 2
                 smooth_y = screen_h // 2
-                gaze_x = screen_w // 2
-                gaze_y = screen_h // 2
             else:
-                # Normal tracking mode - apply calibration offset
                 gaze_x, gaze_y, gaze_world_corrected = project_gaze_to_screen(
                     gaze_vector, rotation_vec, distance, frame_w, frame_h, 
                     sensitivity_multiplier, gaze_vector_offset
                 )
-                
                 gaze_x += offset_x
                 gaze_y += offset_y
-                
                 gaze_x = max(0, min(screen_w - 1, gaze_x))
                 gaze_y = max(0, min(screen_h - 1, gaze_y))
-                
                 smooth_x = int(alpha * gaze_x + (1 - alpha) * smooth_x)
                 smooth_y = int(alpha * gaze_y + (1 - alpha) * smooth_y)
             
-            # Normalize coordinates for VR rendering (0-1 range)
             normalized_x = smooth_x / screen_w
             normalized_y = 1.0 - (smooth_y / screen_h)
             
-            # Calculate confidence based on distance and gaze vector magnitude
             gaze_magnitude = np.linalg.norm(gaze_vector)
             confidence = min(1.0, max(0.0, 1.0 - abs(distance - 0.6) / 0.3)) * min(1.0, gaze_magnitude * 10)
             
-            # Broadcast gaze data via WebSocket (only after calibration)
+            # Update latest gaze data for WebSocket broadcast
             if not calibration_in_progress:
-                gaze_data = {
-                    "x": normalized_x,
-                    "y": normalized_y,
-                    "screenX": smooth_x,
-                    "screenY": smooth_y,
-                    "confidence": confidence,
+                latest_gaze_data = {
+                    "x": float(normalized_x),
+                    "y": float(normalized_y),
+                    "screenX": int(smooth_x),
+                    "screenY": int(smooth_y),
+                    "confidence": float(confidence),
                     "distance": float(distance),
-                    "timestamp": cv2.getTickCount() / cv2.getTickFrequency()
+                    "timestamp": float(cv2.getTickCount() / cv2.getTickFrequency())
                 }
-                if len(gaze_data_queue) < 10:  # Limit queue size
-                    gaze_data_queue.append(gaze_data)
             
-            # Draw gaze pointer
             dot_window.fill(0)
-            
             if calibration_in_progress:
-                # During calibration: show locked center with countdown
-                remaining = calibration_duration - (current_time - calibration_start_time)
-                cv2.circle(dot_window, (smooth_x, smooth_y), 25, (0, 255, 255), -1)  # Yellow during calibration
+                cv2.circle(dot_window, (smooth_x, smooth_y), 25, (0, 255, 255), -1)
                 cv2.circle(dot_window, (smooth_x, smooth_y), 27, (255, 255, 255), 3)
-                
-                # Draw countdown circle
                 progress = (current_time - calibration_start_time) / calibration_duration
                 angle = int(360 * progress)
                 cv2.ellipse(dot_window, (smooth_x, smooth_y), (40, 40), 0, 0, angle, (0, 255, 0), 3)
             else:
-                # Normal mode: red dot
                 cv2.circle(dot_window, (smooth_x, smooth_y), 20, (0, 0, 255), -1)
                 cv2.circle(dot_window, (smooth_x, smooth_y), 22, (255, 255, 255), 2)
-            
+                
             cv2.imshow('Gaze Pointer', dot_window)
             
             for idx in LEFT_IRIS + RIGHT_IRIS:
@@ -402,52 +389,17 @@ while cap.isOpened():
                 y = int(landmarks[idx].y * frame_h)
                 cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
             
-            # Display information
-            if calibration_in_progress:
-                remaining = calibration_duration - (current_time - calibration_start_time)
-                cv2.putText(frame, f"CALIBRATING - Look at CENTER", 
-                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(frame, f"Time remaining: {remaining:.1f}s", 
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(frame, f"Samples collected: {len(calibration_samples)}", 
-                           (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            else:
-                cv2.putText(frame, f"Gaze: ({smooth_x}, {smooth_y})", 
-                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                cv2.putText(frame, f"Normalized: ({normalized_x:.3f}, {normalized_y:.3f})", 
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                cv2.putText(frame, f"Distance: {distance:.2f}m | Confidence: {confidence:.2f}", 
-                           (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                cv2.putText(frame, f"Sensitivity: {sensitivity_multiplier:.1f}x", 
-                           (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                if not calibration_active:  # Only show offset after calibration
-                    cv2.putText(frame, f"Calibration offset: X={gaze_vector_offset[0]:.4f}, Y={gaze_vector_offset[1]:.4f}", 
-                               (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1)
-            
-            if not calibration_in_progress:
-                print(f"\rGaze: X={smooth_x:4d}, Y={smooth_y:4d} | Norm: ({normalized_x:.3f}, {normalized_y:.3f}) | Conf: {confidence:.2f} | Dist: {distance:.2f}m", 
-                      end="", flush=True)
-            else:
-                remaining = calibration_duration - (current_time - calibration_start_time)
-                print(f"\rCalibrating... {remaining:.1f}s remaining | Samples: {len(calibration_samples)}", 
-                      end="", flush=True)
-            
         except Exception as e:
             left_x, left_y = get_eye_position(landmarks, LEFT_EYE, LEFT_IRIS, frame_w, frame_h)
             right_x, right_y = get_eye_position(landmarks, RIGHT_EYE, RIGHT_IRIS, frame_w, frame_h)
-            
             avg_x = (left_x + right_x) / 2
             avg_y = (left_y + right_y) / 2
-            
             gaze_x = int((1 - avg_x) * screen_w) + offset_x
             gaze_y = int(avg_y * screen_h) + offset_y
-            
             gaze_x = max(0, min(screen_w - 1, gaze_x))
             gaze_y = max(0, min(screen_h - 1, gaze_y))
-            
             smooth_x = int(alpha * gaze_x + (1 - alpha) * smooth_x)
             smooth_y = int(alpha * gaze_y + (1 - alpha) * smooth_y)
-            
             dot_window.fill(0)
             cv2.circle(dot_window, (smooth_x, smooth_y), 20, (0, 0, 255), -1)
             cv2.imshow('Gaze Pointer', dot_window)
@@ -461,7 +413,6 @@ while cap.isOpened():
     if key == ord('q'):
         break
     elif key == ord('c'):
-        # Recalibrate - reset and start new calibration
         calibration_active = True
         calibration_start_time = time.time()
         calibration_samples = []

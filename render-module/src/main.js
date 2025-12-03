@@ -24,28 +24,25 @@ let gazeData = {
   x: 0.5,
   y: 0.5,
   confidence: 0.0,
-  connected: false
+  connected: false,
 };
 
 // Foveated rendering configuration
 const FOV_CONFIG = {
-  highQualityRadius: 0.15,      // 15% of screen radius for high quality
-  mediumQualityRadius: 0.35,    // 35% for medium quality
-  lowQualityRadius: 0.6,        // 60% for low quality
-  minPointSize: 0.0005,         // Minimum point size (peripheral)
-  maxPointSize: 0.002,          // Maximum point size (foveal)
-  minOpacity: 0.3,              // Minimum opacity (peripheral)
-  maxOpacity: 1.0               // Maximum opacity (foveal)
+  highQualityRadius: 0.15, // 15% of screen radius for high quality
+  mediumQualityRadius: 0.35, // 35% for medium quality
+  lowQualityRadius: 0.6, // 60% for low quality
+  minPointSize: 0.0005, // Minimum point size (peripheral)
+  maxPointSize: 0.002, // Maximum point size (foveal)
+  minOpacity: 0.3, // Minimum opacity (peripheral)
+  maxOpacity: 1.0, // Maximum opacity (foveal)
 };
 
-const WS_PROTOCOL = window.location.protocol === "https:" ? "wss" : "ws";
-const DEFAULT_WS_HOST = window.location.hostname || "localhost";
-const WS_HOST =
-  import.meta.env.VITE_GAZE_WS_HOST?.trim() || DEFAULT_WS_HOST;
-const WS_PORT = import.meta.env.VITE_GAZE_WS_PORT?.trim() || "8765";
-const WS_URL =
-  import.meta.env.VITE_GAZE_WS_URL?.trim() ||
-  `${WS_PROTOCOL}://${WS_HOST}:${WS_PORT}`;
+const WS_PROTOCOL = "ws";
+const DEFAULT_WS_HOST = "localhost";
+const WS_HOST = DEFAULT_WS_HOST;
+const WS_PORT = "8765";
+const WS_URL = `${WS_PROTOCOL}://${WS_HOST}:${WS_PORT}`;
 
 // WebSocket connection for gaze data
 let ws = null;
@@ -56,13 +53,13 @@ function connectWebSocket() {
   try {
     console.log(`Attempting to connect to ${WS_URL}...`);
     ws = new WebSocket(WS_URL);
-    
+
     ws.onopen = () => {
       console.log("✓ Connected to gaze tracking server");
       gazeData.connected = true;
       reconnectAttempts = 0; // Reset on successful connection
     };
-    
+
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -74,7 +71,7 @@ function connectWebSocket() {
         console.error("Error parsing gaze data:", e);
       }
     };
-    
+
     ws.onerror = (error) => {
       console.warn("WebSocket error:", error);
       gazeData.connected = false;
@@ -85,7 +82,7 @@ function connectWebSocket() {
         );
       }
     };
-    
+
     ws.onclose = (event) => {
       console.log(
         "WebSocket closed. Code:",
@@ -96,21 +93,25 @@ function connectWebSocket() {
         WS_URL
       );
       gazeData.connected = false;
-      
+
       // Only reconnect if it wasn't a manual close
       if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
         reconnectAttempts++;
         const delay = Math.min(2000 * reconnectAttempts, 10000); // Max 10 seconds
         console.log(
-          `Reconnecting to ${WS_URL} in ${delay / 1000}s... (attempt ${reconnectAttempts}/${maxReconnectAttempts})`
+          `Reconnecting to ${WS_URL} in ${
+            delay / 1000
+          }s... (attempt ${reconnectAttempts}/${maxReconnectAttempts})`
         );
         setTimeout(connectWebSocket, delay);
       } else if (reconnectAttempts >= maxReconnectAttempts) {
-        console.error("Max reconnection attempts reached. Please restart the Python eye-tracking module.");
+        console.error(
+          "Max reconnection attempts reached. Please restart the Python eye-tracking module."
+        );
       }
     };
   } catch (error) {
-      console.error("Failed to create WebSocket connection:", error, WS_URL);
+    console.error("Failed to create WebSocket connection:", error, WS_URL);
     gazeData.connected = false;
     if (reconnectAttempts < maxReconnectAttempts) {
       reconnectAttempts++;
@@ -138,7 +139,7 @@ loader.load("/scenes/scene.ply", (geometry) => {
     size: FOV_CONFIG.maxPointSize,
     vertexColors: true,
     transparent: true,
-    opacity: FOV_CONFIG.maxOpacity
+    opacity: FOV_CONFIG.maxOpacity,
   });
 
   pointCloud = new THREE.Points(geometry, material);
@@ -177,21 +178,21 @@ function createFoveatedPointClouds(geometry) {
     size: FOV_CONFIG.maxPointSize,
     vertexColors: true,
     transparent: true,
-    opacity: FOV_CONFIG.maxOpacity
+    opacity: FOV_CONFIG.maxOpacity,
   });
 
   const parafovealMaterial = new THREE.PointsMaterial({
     size: FOV_CONFIG.maxPointSize * 0.6,
     vertexColors: true,
     transparent: true,
-    opacity: FOV_CONFIG.maxOpacity * 0.7
+    opacity: FOV_CONFIG.maxOpacity * 0.7,
   });
 
   const peripheralMaterial = new THREE.PointsMaterial({
     size: FOV_CONFIG.minPointSize,
     vertexColors: true,
     transparent: true,
-    opacity: FOV_CONFIG.minOpacity
+    opacity: FOV_CONFIG.minOpacity,
   });
 
   fovealPoints = new THREE.Points(fovealGeo, fovealMaterial);
@@ -222,15 +223,15 @@ function applyFoveatedRendering() {
   const centerY = 0;
   const gazeX = (gazeData.x - 0.5) * 2;
   const gazeY = (0.5 - gazeData.y) * 2; // Invert Y
-  
+
   // For now, use a gradient effect: higher quality at gaze point
   // This is a simplified version - full implementation would require per-point shaders
   const distanceFromCenter = Math.sqrt(gazeX * gazeX + gazeY * gazeY);
-  
+
   // Adjust overall quality based on gaze position
   // When looking at center, use high quality; when looking away, reduce quality
   const qualityFactor = Math.max(0.3, 1.0 - distanceFromCenter * 0.5);
-  
+
   pointCloud.material.size = THREE.MathUtils.lerp(
     FOV_CONFIG.minPointSize,
     FOV_CONFIG.maxPointSize,
@@ -244,7 +245,7 @@ function applyFoveatedRendering() {
 }
 
 // Debug visualization with gaze point indicator
-const debugDiv = document.createElement('div');
+const debugDiv = document.createElement("div");
 debugDiv.style.cssText = `
   position: fixed;
   top: 10px;
@@ -261,7 +262,7 @@ debugDiv.style.cssText = `
 document.body.appendChild(debugDiv);
 
 // Gaze point indicator
-const gazeIndicator = document.createElement('div');
+const gazeIndicator = document.createElement("div");
 gazeIndicator.style.cssText = `
   position: fixed;
   width: 20px;
@@ -281,41 +282,45 @@ function updateDebugInfo() {
   const conf = gazeData.confidence;
   const x = gazeData.x;
   const y = gazeData.y;
-  
-  let statusText = connected ? '✓ Connected' : '✗ Disconnected';
+
+  let statusText = connected ? "✓ Connected" : "✗ Disconnected";
   if (!connected && reconnectAttempts > 0) {
     statusText += ` (retrying...)`;
   }
-  
+
   debugDiv.innerHTML = `
-    <div style="color: ${connected ? '#0f0' : '#f00'}">Gaze: ${statusText}</div>
+    <div style="color: ${connected ? "#0f0" : "#f00"}">Gaze: ${statusText}</div>
     <div>WS URL: ${WS_URL}</div>
     <div>Position: (${x.toFixed(3)}, ${y.toFixed(3)})</div>
     <div>Confidence: ${(conf * 100).toFixed(1)}%</div>
-    <div>Foveated: ${conf > 0.3 ? 'ON' : 'OFF'}</div>
-    ${!connected ? '<div style="font-size: 10px; color: #ff0; margin-top: 5px;">Start Python module first!</div>' : ''}
+    <div>Foveated: ${conf > 0.3 ? "ON" : "OFF"}</div>
+    ${
+      !connected
+        ? '<div style="font-size: 10px; color: #ff0; margin-top: 5px;">Start Python module first!</div>'
+        : ""
+    }
   `;
-  
+
   // Update gaze indicator position
   if (connected && conf > 0.3) {
-    gazeIndicator.style.display = 'block';
+    gazeIndicator.style.display = "block";
     gazeIndicator.style.left = `${x * window.innerWidth}px`;
     gazeIndicator.style.top = `${y * window.innerHeight}px`;
   } else {
-    gazeIndicator.style.display = 'none';
+    gazeIndicator.style.display = "none";
   }
 }
 
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
-  
+
   // Apply foveated rendering
   applyFoveatedRendering();
-  
+
   // Update debug info
   updateDebugInfo();
-  
+
   renderer.render(scene, camera);
 }
 animate();
