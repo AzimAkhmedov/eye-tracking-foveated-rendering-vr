@@ -1,19 +1,489 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Three.js Laser Scan</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-        height: 100%;
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Foveated Point Cloud Renderer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      overflow: hidden;
+      font-family: 'Consolas', 'Monaco', monospace;
+      background: #000;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100vh;
+    }
+    #debugPanel {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #0f0;
+      padding: 15px;
+      border-radius: 8px;
+      font-size: 12px;
+      z-index: 1000;
+      pointer-events: none;
+      border: 1px solid rgba(0, 255, 0, 0.3);
+      min-width: 320px;
+      box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
+    }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      margin: 4px 0;
+      padding: 3px 0;
+    }
+    .metric-label {
+      color: #888;
+    }
+    .metric-value {
+      color: #0f0;
+      font-weight: bold;
+    }
+    .section-title {
+      color: #0ff;
+      font-weight: bold;
+      margin-top: 10px;
+      margin-bottom: 5px;
+      border-bottom: 1px solid rgba(0, 255, 255, 0.3);
+      padding-bottom: 3px;
+    }
+    .status-connected {
+      color: #0f0;
+    }
+    .status-disconnected {
+      color: #f00;
+    }
+    .performance-bar {
+      height: 4px;
+      background: rgba(0, 255, 0, 0.2);
+      border-radius: 2px;
+      margin-top: 3px;
+      overflow: hidden;
+    }
+    .performance-bar-fill {
+      height: 100%;
+      background: #0f0;
+      transition: width 0.1s;
+    }
+    #gazeIndicator {
+      position: fixed;
+      width: 30px;
+      height: 30px;
+      border: 2px solid #0f0;
+      border-radius: 50%;
+      background: rgba(0, 255, 0, 0.15);
+      pointer-events: none;
+      z-index: 999;
+      transform: translate(-50%, -50%);
+      display: none;
+      box-shadow: 0 0 15px rgba(0, 255, 0, 0.5);
+    }
+    .hotkey {
+      color: #ff0;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div id="debugPanel"></div>
+  <div id="gazeIndicator"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  
+  <script>
+    console.log('Starting application...');
+    console.log('THREE.js version:', THREE.REVISION);
+
+    // WebSocket Configuration
+    const WS_PROTOCOL = "ws";
+    const WS_HOST = "localhost";
+    const WS_PORT = "8765";
+    const WS_URL = `${WS_PROTOCOL}://${WS_HOST}:${WS_PORT}`;
+    let ws = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 10;
+
+    // Gaze tracking data
+    let gazeData = {
+      x: 0.5,
+      y: 0.5,
+      confidence: 0.0,
+      connected: false,
+    };
+
+    // Foveated rendering configuration
+    let foveatedEnabled = true;
+    let skipPeripheral = false;
+    const GAZE_NDC = new THREE.Vector2(0, 0);
+    const RADIUS_FOVEA = 0.3;
+    const RADIUS_PARAFOVEA = 0.7;
+
+    // Performance metrics
+    const perfSamples = [];
+    const PERF_SAMPLE_COUNT = 60;
+    let frameTime = 0;
+    let fps = 0;
+
+    // DOM elements
+    const debugPanel = document.getElementById('debugPanel');
+    const gazeIndicator = document.getElementById('gazeIndicator');
+
+    // Scene setup
+    console.log('Setting up scene...');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a2e);
+
+    const camera = new THREE.PerspectiveCamera(
+      75,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      1000
+    );
+    camera.position.set(0, 0, 5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+    console.log('Renderer created');
+
+    // Create simple test geometry first
+    console.log('Creating point cloud...');
+    
+    const pointCount = 100000;
+    const positions = new Float32Array(pointCount * 3);
+    const colors = new Float32Array(pointCount * 3);
+
+    // Create a simple colorful sphere
+    for (let i = 0; i < pointCount; i++) {
+      // Random sphere distribution
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const r = 0.8 + Math.random() * 0.4;
+
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = r * Math.cos(phi);
+
+      // Bright colors
+      const hue = Math.random();
+      const color = new THREE.Color();
+      color.setHSL(hue, 1.0, 0.6);
+      
+      colors[i * 3] = color.r;
+      colors[i * 3 + 1] = color.g;
+      colors[i * 3 + 2] = color.b;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    console.log('Geometry created with', pointCount, 'points');
+
+    // Use basic PointsMaterial first to test
+    const material = new THREE.PointsMaterial({
+      size: 0.02,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.8,
+      sizeAttenuation: true
+    });
+
+    const pointCloud = new THREE.Points(geometry, material);
+    scene.add(pointCloud);
+    console.log('Point cloud added to scene');
+
+    // Add a test mesh to verify rendering works
+    const testGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+    const testMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true });
+    const testMesh = new THREE.Mesh(testGeo, testMat);
+    testMesh.position.set(0, 0, 0);
+    scene.add(testMesh);
+    console.log('Test cube added');
+
+    // Mouse orbit controls
+    let mouseDown = false;
+    let mouseX = 0;
+    let mouseY = 0;
+    let targetRotationX = 0;
+    let targetRotationY = 0;
+    let rotationX = 0;
+    let rotationY = 0;
+
+    document.addEventListener('mousedown', (e) => {
+      mouseDown = true;
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+    });
+
+    document.addEventListener('mouseup', () => {
+      mouseDown = false;
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (mouseDown) {
+        const deltaX = e.clientX - mouseX;
+        const deltaY = e.clientY - mouseY;
+        targetRotationY += deltaX * 0.005;
+        targetRotationX += deltaY * 0.005;
+        mouseX = e.clientX;
+        mouseY = e.clientY;
       }
-    </style>
-  </head>
-  <body>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+    });
+
+    // Zoom
+    document.addEventListener('wheel', (e) => {
+      camera.position.z += e.deltaY * 0.01;
+      camera.position.z = Math.max(2, Math.min(camera.position.z, 20));
+    });
+
+    // Performance tracking
+    function updatePerformanceMeasures(renderStart, renderEnd) {
+      const ms = renderEnd - renderStart;
+      frameTime = ms;
+      perfSamples.push(ms);
+      if (perfSamples.length > PERF_SAMPLE_COUNT) perfSamples.shift();
+
+      const sum = perfSamples.reduce((a, b) => a + b, 0);
+      const avg = sum / perfSamples.length;
+      fps = 1000 / (avg || 16.67);
+    }
+
+    // Update debug UI
+    function updateDebugInfo() {
+      const connected = gazeData.connected;
+      const conf = gazeData.confidence;
+      const ri = renderer.info;
+
+      const avgFrame = perfSamples.length
+        ? (perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length).toFixed(2)
+        : '0';
+      
+      const fpsPercent = Math.min((fps / 60) * 100, 100);
+      
+      debugPanel.innerHTML = `
+        <div class="section-title">🔌 CONNECTION STATUS</div>
+        <div class="metric-row">
+          <span class="metric-label">WebSocket:</span>
+          <span class="metric-value ${connected ? 'status-connected' : 'status-disconnected'}">
+            ${connected ? '✓ Connected' : '✗ Disconnected'}
+          </span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Server:</span>
+          <span class="metric-value">${WS_URL}</span>
+        </div>
+        
+        <div class="section-title">👁️ GAZE TRACKING</div>
+        <div class="metric-row">
+          <span class="metric-label">Position:</span>
+          <span class="metric-value">(${gazeData.x.toFixed(3)}, ${gazeData.y.toFixed(3)})</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Confidence:</span>
+          <span class="metric-value">${(conf * 100).toFixed(1)}%</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${conf * 100}%"></div>
+        </div>
+        
+        <div class="section-title">⚡ PERFORMANCE</div>
+        <div class="metric-row">
+          <span class="metric-label">FPS:</span>
+          <span class="metric-value">${Math.round(fps)} fps</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${fpsPercent}%"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Frame Time:</span>
+          <span class="metric-value">${frameTime.toFixed(2)} ms (avg: ${avgFrame} ms)</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Draw Calls:</span>
+          <span class="metric-value">${ri.render.calls}</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Points:</span>
+          <span class="metric-value">${ri.render.points.toLocaleString()}</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Camera Z:</span>
+          <span class="metric-value">${camera.position.z.toFixed(2)}</span>
+        </div>
+        
+        <div class="section-title">🎨 RENDER MODE</div>
+        <div class="metric-row">
+          <span class="metric-label">Foveated:</span>
+          <span class="metric-value">${foveatedEnabled ? 'ON ✓' : 'OFF ✗'}</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Skip Peripheral:</span>
+          <span class="metric-value">${skipPeripheral ? 'ON ✓' : 'OFF ✗'}</span>
+        </div>
+        
+        <div class="section-title">⌨️ HOTKEYS</div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">F</span> - Toggle Foveated</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">S</span> - Skip Peripheral</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">T</span> - Log Metrics</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">R</span> - Reconnect WS</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">+/-</span> - Point Size</span>
+        </div>
+      `;
+
+      // Update gaze indicator
+      if (connected && conf > 0.2) {
+        gazeIndicator.style.display = 'block';
+        gazeIndicator.style.left = `${gazeData.x * window.innerWidth}px`;
+        gazeIndicator.style.top = `${gazeData.y * window.innerHeight}px`;
+      } else {
+        gazeIndicator.style.display = 'none';
+      }
+    }
+
+    // WebSocket connection
+    function connectWebSocket() {
+      try {
+        console.log(`Attempting to connect to ${WS_URL}...`);
+        ws = new WebSocket(WS_URL);
+
+        ws.onopen = () => {
+          console.log('✓ Connected to gaze tracking server');
+          gazeData.connected = true;
+          reconnectAttempts = 0;
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            gazeData.x = data.x;
+            gazeData.y = data.y;
+            gazeData.confidence = data.confidence || 0.0;
+          } catch (e) {
+            console.error('Error parsing gaze data:', e);
+          }
+        };
+
+        ws.onerror = (error) => {
+          gazeData.connected = false;
+          if (reconnectAttempts === 0 || reconnectAttempts % 5 === 0) {
+            console.log(`Make sure eye-tracking server is running at ${WS_URL}`);
+          }
+        };
+
+        ws.onclose = (event) => {
+          gazeData.connected = false;
+          if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            const delay = Math.min(2000 * reconnectAttempts, 10000);
+            console.log(`Reconnecting in ${delay / 1000}s... (${reconnectAttempts}/${maxReconnectAttempts})`);
+            setTimeout(connectWebSocket, delay);
+          }
+        };
+      } catch (error) {
+        console.error('Failed to create WebSocket:', error);
+        gazeData.connected = false;
+      }
+    }
+
+    // Keyboard controls
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'f' || e.key === 'F') {
+        foveatedEnabled = !foveatedEnabled;
+        console.log('Foveated rendering:', foveatedEnabled);
+      } else if (e.key === 's' || e.key === 'S') {
+        skipPeripheral = !skipPeripheral;
+        console.log('Skip peripheral:', skipPeripheral);
+      } else if (e.key === 't' || e.key === 'T') {
+        console.table({
+          FPS: Math.round(fps),
+          'Frame Time': frameTime.toFixed(2) + ' ms',
+          'Avg Frame': perfSamples.length ? (perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length).toFixed(2) : 'n/a',
+          'Draw Calls': renderer.info.render.calls,
+          'Points': renderer.info.render.points,
+          'Foveated': foveatedEnabled,
+          'Skip Peripheral': skipPeripheral,
+        });
+      } else if (e.key === 'r' || e.key === 'R') {
+        console.log('Manual reconnect...');
+        reconnectAttempts = 0;
+        if (ws) ws.close();
+        connectWebSocket();
+      } else if (e.key === '+' || e.key === '=') {
+        material.size *= 1.2;
+        console.log('Point size:', material.size);
+      } else if (e.key === '-' || e.key === '_') {
+        material.size *= 0.8;
+        console.log('Point size:', material.size);
+      }
+    });
+
+    // Animation loop
+    let frameCount = 0;
+    function animate() {
+      requestAnimationFrame(animate);
+
+      frameCount++;
+
+      // Smooth rotation
+      rotationX += (targetRotationX - rotationX) * 0.1;
+      rotationY += (targetRotationY - rotationY) * 0.1;
+      pointCloud.rotation.x = rotationX;
+      pointCloud.rotation.y = rotationY;
+      testMesh.rotation.x = rotationX;
+      testMesh.rotation.y = rotationY;
+
+      // Auto-rotate if not interacting
+      if (!mouseDown) {
+        pointCloud.rotation.y += 0.002;
+        testMesh.rotation.y += 0.002;
+      }
+
+      const t0 = performance.now();
+      renderer.render(scene, camera);
+      const t1 = performance.now();
+
+      updatePerformanceMeasures(t0, t1);
+      updateDebugInfo();
+
+      if (frameCount === 1) {
+        console.log('First frame rendered successfully!');
+      }
+    }
+
+    // Window resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Start
+    console.log('Starting animation loop...');
+    animate();
+    
+    setTimeout(() => {
+      connectWebSocket();
+    }, 1000);
+  </script>
+</body>
 </html>
