@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>True Foveated Point Cloud Renderer</title>
+    <title>Foveated Renderer for Any Scene</title>
     <style>
       * {
         margin: 0;
@@ -34,6 +34,54 @@
         border: 1px solid rgba(0, 255, 0, 0.3);
         min-width: 320px;
         box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
+      }
+      #fileUpload {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        z-index: 1001;
+        pointer-events: all;
+      }
+      #fileUpload input {
+        display: none;
+      }
+      #fileUpload label {
+        background: rgba(0, 255, 0, 0.2);
+        color: #0f0;
+        padding: 10px 20px;
+        border-radius: 5px;
+        border: 1px solid #0f0;
+        cursor: pointer;
+        font-family: "Consolas", monospace;
+        transition: all 0.3s;
+      }
+      #fileUpload label:hover {
+        background: rgba(0, 255, 0, 0.4);
+      }
+      #renderModeToggle {
+        position: fixed;
+        top: 60px;
+        right: 10px;
+        z-index: 1001;
+        pointer-events: all;
+      }
+      #renderModeToggle button {
+        background: rgba(0, 255, 0, 0.2);
+        color: #0f0;
+        padding: 10px 20px;
+        border-radius: 5px;
+        border: 1px solid #0f0;
+        cursor: pointer;
+        font-family: "Consolas", monospace;
+        transition: all 0.3s;
+        font-weight: bold;
+      }
+      #renderModeToggle button:hover {
+        background: rgba(0, 255, 0, 0.4);
+      }
+      #renderModeToggle button.active {
+        background: rgba(0, 255, 0, 0.6);
+        box-shadow: 0 0 15px rgba(0, 255, 0, 0.5);
       }
       .metric-row {
         display: flex;
@@ -100,12 +148,18 @@
   <body>
     <div id="debugPanel"></div>
     <div id="gazeIndicator"></div>
+    <div id="fileUpload">
+      <input type="file" id="modelInput" accept=".gltf,.glb,.obj,.fbx" />
+      <label for="modelInput">📁 Load Model</label>
+    </div>
+    <div id="renderModeToggle">
+      <button id="toggleButton" class="active">🎯 FOVEATED ON</button>
+    </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
     <script>
-      console.log("Starting True Foveated Renderer...");
-      console.log("THREE.js version:", THREE.REVISION);
+      console.log("Starting Foveated Renderer for Any Scene...");
 
       const WS_PROTOCOL = "ws";
       const WS_HOST = "localhost";
@@ -123,23 +177,25 @@
       };
 
       let foveatedEnabled = true;
-      const RADIUS_FOVEA = 0.2;
+      const RADIUS_FOVEA = 0.25;
       const RADIUS_PARAFOVEA = 0.5;
-      const RADIUS_PERIPHERAL = 1.0;
 
       const perfSamples = [];
       const PERF_SAMPLE_COUNT = 60;
       let frameTime = 0;
       let fps = 0;
-      let pointsRendered = 0;
-      let pointsSkipped = 0;
+      let totalMeshes = 0;
+      let renderedMeshes = 0;
+      let skippedMeshes = 0;
+      let totalTriangles = 0;
+      let renderedTriangles = 0;
 
       const debugPanel = document.getElementById("debugPanel");
       const gazeIndicator = document.getElementById("gazeIndicator");
 
-      console.log("Setting up scene...");
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x1a1a2e);
+      scene.fog = new THREE.Fog(0x1a1a2e, 10, 50);
 
       const camera = new THREE.PerspectiveCamera(
         75,
@@ -147,151 +203,345 @@
         0.1,
         1000
       );
-      camera.position.set(0, 0, 5);
+      camera.position.set(0, 2, 8);
 
       const renderer = new THREE.WebGLRenderer({ antialias: true });
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       document.body.appendChild(renderer.domElement);
 
-      console.log("Creating point cloud with LOD levels...");
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+      scene.add(ambientLight);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(5, 10, 5);
+      scene.add(dirLight);
 
-      const pointCount = 100000;
-      
-      // Создаем три уровня детализации
-      const foveaPoints = [];
-      const parafoveaPoints = [];
-      const peripheralPoints = [];
-      
-      const allPositions = [];
-      const allColors = [];
+      const sceneObjects = [];
+      let loadedModel = null;
 
-      for (let i = 0; i < pointCount; i++) {
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.acos(2 * Math.random() - 1);
-        const r = 0.8 + Math.random() * 0.4;
+      function createTestScene() {
+        console.log("Creating test scene...");
 
-        const x = r * Math.sin(phi) * Math.cos(theta);
-        const y = r * Math.sin(phi) * Math.sin(theta);
-        const z = r * Math.cos(phi);
+        const testGroup = new THREE.Group();
 
-        const hue = Math.random();
-        const color = new THREE.Color();
-        color.setHSL(hue, 1.0, 0.6);
+        const sphereGeo = new THREE.SphereGeometry(1, 32, 32);
+        const sphereMat = new THREE.MeshStandardMaterial({
+          color: 0xff6b6b,
+          metalness: 0.5,
+          roughness: 0.5,
+        });
+        const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+        sphere.userData.triangleCount = sphereGeo.attributes.position.count / 3;
+        testGroup.add(sphere);
+        sceneObjects.push(sphere);
 
-        allPositions.push(x, y, z);
-        allColors.push(color.r, color.g, color.b);
-      }
+        const boxGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+        for (let i = 0; i < 12; i++) {
+          const angle = (i / 12) * Math.PI * 2;
+          const radius = 3;
+          const boxMat = new THREE.MeshStandardMaterial({
+            color: new THREE.Color().setHSL(i / 12, 1, 0.6),
+            metalness: 0.3,
+            roughness: 0.7,
+          });
+          const box = new THREE.Mesh(boxGeo, boxMat);
+          box.position.x = Math.cos(angle) * radius;
+          box.position.z = Math.sin(angle) * radius;
+          box.position.y = Math.sin(i * 0.5) * 0.5;
+          box.rotation.y = angle;
+          box.userData.triangleCount = 12;
+          testGroup.add(box);
+          sceneObjects.push(box);
+        }
 
-      // Фовеа: все точки с полным размером
-      const foveaGeometry = new THREE.BufferGeometry();
-      foveaGeometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(new Float32Array(allPositions), 3)
-      );
-      foveaGeometry.setAttribute(
-        "color",
-        new THREE.BufferAttribute(new Float32Array(allColors), 3)
-      );
+        const coneGeo = new THREE.ConeGeometry(0.3, 0.8, 8);
+        for (let i = 0; i < 20; i++) {
+          const angle = (i / 20) * Math.PI * 2;
+          const radius = 5;
+          const coneMat = new THREE.MeshStandardMaterial({
+            color: new THREE.Color().setHSL(i / 20, 0.8, 0.5),
+            metalness: 0.2,
+            roughness: 0.8,
+          });
+          const cone = new THREE.Mesh(coneGeo, coneMat);
+          cone.position.x = Math.cos(angle) * radius;
+          cone.position.z = Math.sin(angle) * radius;
+          cone.position.y = -0.5;
+          cone.userData.triangleCount = coneGeo.attributes.position.count / 3;
+          testGroup.add(cone);
+          sceneObjects.push(cone);
+        }
 
-      const foveaMaterial = new THREE.PointsMaterial({
-        size: 0.025,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.9,
-        sizeAttenuation: true,
-      });
+        const floorGeo = new THREE.PlaneGeometry(20, 20, 10, 10);
+        const floorMat = new THREE.MeshStandardMaterial({
+          color: 0x2c3e50,
+          metalness: 0.1,
+          roughness: 0.9,
+          side: THREE.DoubleSide,
+        });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -2;
+        floor.userData.triangleCount = floorGeo.attributes.position.count / 3;
+        testGroup.add(floor);
+        sceneObjects.push(floor);
 
-      const foveaCloud = new THREE.Points(foveaGeometry, foveaMaterial);
-      scene.add(foveaCloud);
+        scene.add(testGroup);
+        loadedModel = testGroup;
 
-      // Парафовеа: каждая 3-я точка с меньшим размером
-      const parafoveaPositions = [];
-      const parafoveaColors = [];
-      for (let i = 0; i < pointCount; i += 3) {
-        parafoveaPositions.push(
-          allPositions[i * 3],
-          allPositions[i * 3 + 1],
-          allPositions[i * 3 + 2]
+        totalMeshes = sceneObjects.length;
+        totalTriangles = sceneObjects.reduce(
+          (sum, obj) => sum + (obj.userData.triangleCount || 0),
+          0
         );
-        parafoveaColors.push(
-          allColors[i * 3],
-          allColors[i * 3 + 1],
-          allColors[i * 3 + 2]
-        );
-      }
 
-      const parafoveaGeometry = new THREE.BufferGeometry();
-      parafoveaGeometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(new Float32Array(parafoveaPositions), 3)
-      );
-      parafoveaGeometry.setAttribute(
-        "color",
-        new THREE.BufferAttribute(new Float32Array(parafoveaColors), 3)
-      );
-
-      const parafoveaMaterial = new THREE.PointsMaterial({
-        size: 0.02,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.7,
-        sizeAttenuation: true,
-      });
-
-      const parafoveaCloud = new THREE.Points(parafoveaGeometry, parafoveaMaterial);
-      scene.add(parafoveaCloud);
-
-      // Периферия: каждая 8-я точка с минимальным размером
-      const peripheralPositions = [];
-      const peripheralColors = [];
-      for (let i = 0; i < pointCount; i += 8) {
-        peripheralPositions.push(
-          allPositions[i * 3],
-          allPositions[i * 3 + 1],
-          allPositions[i * 3 + 2]
-        );
-        peripheralColors.push(
-          allColors[i * 3],
-          allColors[i * 3 + 1],
-          allColors[i * 3 + 2]
+        console.log(
+          `Test scene created: ${totalMeshes} meshes, ${totalTriangles} triangles`
         );
       }
 
-      const peripheralGeometry = new THREE.BufferGeometry();
-      peripheralGeometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(new Float32Array(peripheralPositions), 3)
-      );
-      peripheralGeometry.setAttribute(
-        "color",
-        new THREE.BufferAttribute(new Float32Array(peripheralColors), 3)
-      );
+      createTestScene();
 
-      const peripheralMaterial = new THREE.PointsMaterial({
-        size: 0.015,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.5,
-        sizeAttenuation: true,
-      });
+      function getScreenPosition(object) {
+        const vector = new THREE.Vector3();
+        object.getWorldPosition(vector);
+        vector.project(camera);
 
-      const peripheralCloud = new THREE.Points(peripheralGeometry, peripheralMaterial);
-      scene.add(peripheralCloud);
+        return {
+          x: (vector.x + 1) / 2,
+          y: (-vector.y + 1) / 2,
+          z: vector.z,
+        };
+      }
 
-      console.log("Point cloud LOD created:");
-      console.log("- Fovea:", pointCount, "points");
-      console.log("- Parafovea:", parafoveaPositions.length / 3, "points");
-      console.log("- Peripheral:", peripheralPositions.length / 3, "points");
+      function getDistanceToGaze(object) {
+        const pos = getScreenPosition(object);
 
-      // Тестовый куб
-      const testGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-      const testMat = new THREE.MeshBasicMaterial({
-        color: 0xff0000,
-        wireframe: true,
-      });
-      const testMesh = new THREE.Mesh(testGeo, testMat);
-      scene.add(testMesh);
+        if (pos.z > 1) return 999;
+
+        const dx = pos.x - gazeData.x;
+        const dy = pos.y - gazeData.y;
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+
+      function updateFoveatedRendering() {
+        if (!foveatedEnabled) {
+          sceneObjects.forEach((obj) => {
+            obj.visible = true;
+            if (obj.material) {
+              obj.material.wireframe = false;
+            }
+          });
+          renderedMeshes = totalMeshes;
+          skippedMeshes = 0;
+          renderedTriangles = totalTriangles;
+          return;
+        }
+
+        renderedMeshes = 0;
+        skippedMeshes = 0;
+        renderedTriangles = 0;
+
+        sceneObjects.forEach((obj) => {
+          const dist = getDistanceToGaze(obj);
+
+          if (dist < RADIUS_FOVEA) {
+            obj.visible = true;
+            if (obj.material) {
+              obj.material.wireframe = false;
+              obj.material.opacity = 1;
+              obj.material.transparent = false;
+            }
+            renderedMeshes++;
+            renderedTriangles += obj.userData.triangleCount || 0;
+          } else if (dist < RADIUS_PARAFOVEA) {
+            obj.visible = true;
+            if (obj.material) {
+              obj.material.wireframe = true;
+              obj.material.opacity = 0.5;
+              obj.material.transparent = true;
+            }
+            renderedMeshes++;
+            renderedTriangles += (obj.userData.triangleCount || 0) * 0.1;
+          } else {
+            obj.visible = false;
+            skippedMeshes++;
+          }
+        });
+      }
+
+      function updatePerformanceMeasures(renderStart, renderEnd) {
+        const ms = renderEnd - renderStart;
+        frameTime = ms;
+        perfSamples.push(ms);
+        if (perfSamples.length > PERF_SAMPLE_COUNT) perfSamples.shift();
+
+        const sum = perfSamples.reduce((a, b) => a + b, 0);
+        const avg = sum / perfSamples.length;
+        fps = 1000 / (avg || 16.67);
+      }
+
+      function updateDebugInfo() {
+        const connected = gazeData.connected;
+        const conf = gazeData.confidence;
+
+        const avgFrame = perfSamples.length
+          ? (
+              perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length
+            ).toFixed(2)
+          : "0";
+
+        const fpsPercent = Math.min((fps / 60) * 100, 100);
+        const renderPercent =
+          totalMeshes > 0 ? (renderedMeshes / totalMeshes) * 100 : 0;
+        const trianglePercent =
+          totalTriangles > 0 ? (renderedTriangles / totalTriangles) * 100 : 0;
+        const optimization =
+          totalMeshes > 0
+            ? ((skippedMeshes / totalMeshes) * 100).toFixed(1)
+            : "0";
+
+        debugPanel.innerHTML = `
+        <div class="section-title">🔌 CONNECTION</div>
+        <div class="metric-row">
+          <span class="metric-label">WebSocket:</span>
+          <span class="metric-value ${
+            connected ? "status-connected" : "status-disconnected"
+          }">
+            ${connected ? "✓ Connected" : "✗ Disconnected"}
+          </span>
+        </div>
+        
+        <div class="section-title">👁️ GAZE</div>
+        <div class="metric-row">
+          <span class="metric-label">Position:</span>
+          <span class="metric-value">(${gazeData.x.toFixed(
+            3
+          )}, ${gazeData.y.toFixed(3)})</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Confidence:</span>
+          <span class="metric-value">${(conf * 100).toFixed(1)}%</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${conf * 100}%"></div>
+        </div>
+        
+        <div class="section-title">⚡ PERFORMANCE</div>
+        <div class="metric-row">
+          <span class="metric-label">FPS:</span>
+          <span class="metric-value">${Math.round(fps)} fps</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${fpsPercent}%"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Frame Time:</span>
+          <span class="metric-value">${frameTime.toFixed(
+            2
+          )} ms (avg: ${avgFrame})</span>
+        </div>
+        
+        <div class="section-title">🎨 RENDERING MODE</div>
+        <div class="metric-row">
+          <span class="metric-label">Current Mode:</span>
+          <span class="metric-value">${
+            foveatedEnabled ? "🎯 FOVEATED" : "👁️ FULL SCENE"
+          }</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Status:</span>
+          <span class="metric-value">${
+            foveatedEnabled
+              ? "Optimizing based on gaze"
+              : "Rendering everything"
+          }</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Meshes:</span>
+          <span class="metric-value">${renderedMeshes} / ${totalMeshes}</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${renderPercent}%"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Triangles:</span>
+          <span class="metric-value">${Math.round(
+            renderedTriangles
+          ).toLocaleString()} / ${totalTriangles.toLocaleString()}</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${trianglePercent}%"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Optimization:</span>
+          <span class="metric-value optimization-gain">${
+            foveatedEnabled ? optimization + "% saved" : "0% (Full render)"
+          }</span>
+        </div>
+        
+        <div class="section-title">⌨️ CONTROLS</div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">F</span> - Toggle Foveated</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label"><span class="hotkey">R</span> - Reconnect WS</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Mouse - Rotate Scene</span>
+        </div>
+      `;
+
+        if (connected && conf > 0.2) {
+          gazeIndicator.style.display = "block";
+          gazeIndicator.style.left = `${gazeData.x * window.innerWidth}px`;
+          gazeIndicator.style.top = `${gazeData.y * window.innerHeight}px`;
+        } else {
+          gazeIndicator.style.display = "none";
+        }
+      }
+
+      function connectWebSocket() {
+        try {
+          ws = new WebSocket(WS_URL);
+
+          ws.onopen = () => {
+            console.log("✓ Connected to gaze tracking server");
+            gazeData.connected = true;
+            reconnectAttempts = 0;
+          };
+
+          ws.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              gazeData.x = data.x;
+              gazeData.y = data.y;
+              gazeData.confidence = data.confidence || 0.0;
+            } catch (e) {
+              console.error("Error parsing gaze data:", e);
+            }
+          };
+
+          ws.onerror = (error) => {
+            gazeData.connected = false;
+          };
+
+          ws.onclose = (event) => {
+            gazeData.connected = false;
+            if (
+              event.code !== 1000 &&
+              reconnectAttempts < maxReconnectAttempts
+            ) {
+              reconnectAttempts++;
+              const delay = Math.min(2000 * reconnectAttempts, 10000);
+              setTimeout(connectWebSocket, delay);
+            }
+          };
+        } catch (error) {
+          console.error("Failed to create WebSocket:", error);
+          gazeData.connected = false;
+        }
+      }
 
       let mouseDown = false;
       let mouseX = 0;
@@ -324,247 +574,13 @@
 
       document.addEventListener("wheel", (e) => {
         camera.position.z += e.deltaY * 0.01;
-        camera.position.z = Math.max(2, Math.min(camera.position.z, 20));
+        camera.position.z = Math.max(2, Math.min(camera.position.z, 30));
       });
-
-      // Функция для вычисления расстояния от точки на экране до взгляда
-      function getScreenDistance(point3D, gazeX, gazeY) {
-        const vector = point3D.clone();
-        vector.project(camera);
-        
-        const screenX = (vector.x + 1) / 2;
-        const screenY = (-vector.y + 1) / 2;
-        
-        const dx = screenX - gazeX;
-        const dy = screenY - gazeY;
-        
-        return Math.sqrt(dx * dx + dy * dy);
-      }
-
-      // Функция обновления видимости облаков
-      function updateFoveatedRendering() {
-        if (!foveatedEnabled) {
-          foveaCloud.visible = true;
-          parafoveaCloud.visible = false;
-          peripheralCloud.visible = false;
-          pointsRendered = pointCount;
-          pointsSkipped = 0;
-          return;
-        }
-
-        // Получаем центр облака на экране
-        const cloudCenter = new THREE.Vector3(0, 0, 0);
-        const distToGaze = getScreenDistance(cloudCenter, gazeData.x, gazeData.y);
-
-        // Определяем какой LOD показывать
-        if (distToGaze < RADIUS_FOVEA) {
-          // Фовеа: показываем все точки
-          foveaCloud.visible = true;
-          parafoveaCloud.visible = false;
-          peripheralCloud.visible = false;
-          pointsRendered = pointCount;
-          pointsSkipped = 0;
-        } else if (distToGaze < RADIUS_PARAFOVEA) {
-          // Парафовеа: показываем средний LOD
-          foveaCloud.visible = false;
-          parafoveaCloud.visible = true;
-          peripheralCloud.visible = false;
-          pointsRendered = parafoveaPositions.length / 3;
-          pointsSkipped = pointCount - pointsRendered;
-        } else {
-          // Периферия: показываем минимальный LOD
-          foveaCloud.visible = false;
-          parafoveaCloud.visible = false;
-          peripheralCloud.visible = true;
-          pointsRendered = peripheralPositions.length / 3;
-          pointsSkipped = pointCount - pointsRendered;
-        }
-      }
-
-      function updatePerformanceMeasures(renderStart, renderEnd) {
-        const ms = renderEnd - renderStart;
-        frameTime = ms;
-        perfSamples.push(ms);
-        if (perfSamples.length > PERF_SAMPLE_COUNT) perfSamples.shift();
-
-        const sum = perfSamples.reduce((a, b) => a + b, 0);
-        const avg = sum / perfSamples.length;
-        fps = 1000 / (avg || 16.67);
-      }
-
-      function updateDebugInfo() {
-        const connected = gazeData.connected;
-        const conf = gazeData.confidence;
-
-        const avgFrame = perfSamples.length
-          ? (
-              perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length
-            ).toFixed(2)
-          : "0";
-
-        const fpsPercent = Math.min((fps / 60) * 100, 100);
-        const renderPercent = (pointsRendered / pointCount) * 100;
-        const optimization = ((pointsSkipped / pointCount) * 100).toFixed(1);
-
-        debugPanel.innerHTML = `
-        <div class="section-title">🔌 CONNECTION STATUS</div>
-        <div class="metric-row">
-          <span class="metric-label">WebSocket:</span>
-          <span class="metric-value ${
-            connected ? "status-connected" : "status-disconnected"
-          }">
-            ${connected ? "✓ Connected" : "✗ Disconnected"}
-          </span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Server:</span>
-          <span class="metric-value">${WS_URL}</span>
-        </div>
-        
-        <div class="section-title">👁️ GAZE TRACKING</div>
-        <div class="metric-row">
-          <span class="metric-label">Position:</span>
-          <span class="metric-value">(${gazeData.x.toFixed(
-            3
-          )}, ${gazeData.y.toFixed(3)})</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Confidence:</span>
-          <span class="metric-value">${(conf * 100).toFixed(1)}%</span>
-        </div>
-        <div class="performance-bar">
-          <div class="performance-bar-fill" style="width: ${conf * 100}%"></div>
-        </div>
-        
-        <div class="section-title">⚡ PERFORMANCE</div>
-        <div class="metric-row">
-          <span class="metric-label">FPS:</span>
-          <span class="metric-value">${Math.round(fps)} fps</span>
-        </div>
-        <div class="performance-bar">
-          <div class="performance-bar-fill" style="width: ${fpsPercent}%"></div>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Frame Time:</span>
-          <span class="metric-value">${frameTime.toFixed(
-            2
-          )} ms (avg: ${avgFrame} ms)</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Camera Z:</span>
-          <span class="metric-value">${camera.position.z.toFixed(2)}</span>
-        </div>
-        
-        <div class="section-title">🎨 FOVEATED RENDERING</div>
-        <div class="metric-row">
-          <span class="metric-label">Mode:</span>
-          <span class="metric-value">${
-            foveatedEnabled ? "OPTIMIZED ✓" : "FULL QUALITY"
-          }</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Points Rendered:</span>
-          <span class="metric-value">${pointsRendered.toLocaleString()} / ${pointCount.toLocaleString()}</span>
-        </div>
-        <div class="performance-bar">
-          <div class="performance-bar-fill" style="width: ${renderPercent}%"></div>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Optimization Gain:</span>
-          <span class="metric-value optimization-gain">${optimization}% saved</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Points Skipped:</span>
-          <span class="metric-value">${pointsSkipped.toLocaleString()}</span>
-        </div>
-        
-        <div class="section-title">⌨️ CONTROLS</div>
-        <div class="metric-row">
-          <span class="metric-label"><span class="hotkey">F</span> - Toggle Foveated</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label"><span class="hotkey">R</span> - Reconnect WS</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label"><span class="hotkey">T</span> - Log Stats</span>
-        </div>
-      `;
-
-        if (connected && conf > 0.2) {
-          gazeIndicator.style.display = "block";
-          gazeIndicator.style.left = `${gazeData.x * window.innerWidth}px`;
-          gazeIndicator.style.top = `${gazeData.y * window.innerHeight}px`;
-        } else {
-          gazeIndicator.style.display = "none";
-        }
-      }
-
-      function connectWebSocket() {
-        try {
-          console.log(`Attempting to connect to ${WS_URL}...`);
-          ws = new WebSocket(WS_URL);
-
-          ws.onopen = () => {
-            console.log("✓ Connected to gaze tracking server");
-            gazeData.connected = true;
-            reconnectAttempts = 0;
-          };
-
-          ws.onmessage = (event) => {
-            try {
-              const data = JSON.parse(event.data);
-              gazeData.x = data.x;
-              gazeData.y = data.y;
-              gazeData.confidence = data.confidence || 0.0;
-            } catch (e) {
-              console.error("Error parsing gaze data:", e);
-            }
-          };
-
-          ws.onerror = (error) => {
-            gazeData.connected = false;
-            if (reconnectAttempts === 0 || reconnectAttempts % 5 === 0) {
-              console.log(
-                `Make sure eye-tracking server is running at ${WS_URL}`
-              );
-            }
-          };
-
-          ws.onclose = (event) => {
-            gazeData.connected = false;
-            if (
-              event.code !== 1000 &&
-              reconnectAttempts < maxReconnectAttempts
-            ) {
-              reconnectAttempts++;
-              const delay = Math.min(2000 * reconnectAttempts, 10000);
-              console.log(
-                `Reconnecting in ${
-                  delay / 1000
-                }s... (${reconnectAttempts}/${maxReconnectAttempts})`
-              );
-              setTimeout(connectWebSocket, delay);
-            }
-          };
-        } catch (error) {
-          console.error("Failed to create WebSocket:", error);
-          gazeData.connected = false;
-        }
-      }
 
       window.addEventListener("keydown", (e) => {
         if (e.key === "f" || e.key === "F") {
           foveatedEnabled = !foveatedEnabled;
           console.log("Foveated rendering:", foveatedEnabled);
-        } else if (e.key === "t" || e.key === "T") {
-          console.table({
-            FPS: Math.round(fps),
-            "Frame Time": frameTime.toFixed(2) + " ms",
-            "Points Rendered": pointsRendered.toLocaleString(),
-            "Points Skipped": pointsSkipped.toLocaleString(),
-            "Optimization": ((pointsSkipped / pointCount) * 100).toFixed(1) + "%",
-            Foveated: foveatedEnabled,
-          });
         } else if (e.key === "r" || e.key === "R") {
           console.log("Manual reconnect...");
           reconnectAttempts = 0;
@@ -573,27 +589,46 @@
         }
       });
 
+      document.getElementById("modelInput").addEventListener("change", (e) => {
+        console.log("File upload not implemented in this demo");
+        console.log(
+          "In production, use GLTFLoader, OBJLoader, or FBXLoader here"
+        );
+        alert(
+          "Model loading would be implemented here with appropriate loaders.\n\nFor now, enjoy the test scene!"
+        );
+      });
+
+      const toggleButton = document.getElementById("toggleButton");
+
+      toggleButton.addEventListener("click", () => {
+        foveatedEnabled = !foveatedEnabled;
+
+        if (foveatedEnabled) {
+          toggleButton.textContent = "🎯 FOVEATED ON";
+          toggleButton.classList.add("active");
+          console.log(
+            "✓ Foveated rendering ENABLED - Objects outside gaze will be culled"
+          );
+        } else {
+          toggleButton.textContent = "👁️ FULL RENDER";
+          toggleButton.classList.remove("active");
+          console.log("✗ Foveated rendering DISABLED - Rendering entire scene");
+        }
+      });
+
       function animate() {
         requestAnimationFrame(animate);
 
-        rotationX += (targetRotationX - rotationX) * 0.1;
-        rotationY += (targetRotationY - rotationY) * 0.1;
-        
-        foveaCloud.rotation.x = rotationX;
-        foveaCloud.rotation.y = rotationY;
-        parafoveaCloud.rotation.x = rotationX;
-        parafoveaCloud.rotation.y = rotationY;
-        peripheralCloud.rotation.x = rotationX;
-        peripheralCloud.rotation.y = rotationY;
-        testMesh.rotation.x = rotationX;
-        testMesh.rotation.y = rotationY;
+        if (loadedModel) {
+          rotationX += (targetRotationX - rotationX) * 0.1;
+          rotationY += (targetRotationY - rotationY) * 0.1;
+          loadedModel.rotation.x = rotationX;
+          loadedModel.rotation.y = rotationY;
 
-        if (!mouseDown) {
-          const autoRotation = 0.002;
-          foveaCloud.rotation.y += autoRotation;
-          parafoveaCloud.rotation.y += autoRotation;
-          peripheralCloud.rotation.y += autoRotation;
-          testMesh.rotation.y += autoRotation;
+          if (!mouseDown) {
+            loadedModel.rotation.y += 0.005;
+          }
         }
 
         const t0 = performance.now();
@@ -613,7 +648,6 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
       });
 
-      console.log("Starting animation loop...");
       animate();
 
       setTimeout(() => {

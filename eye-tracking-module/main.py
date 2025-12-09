@@ -50,9 +50,8 @@ LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
 
 smooth_x, smooth_y = screen_w // 2, screen_h // 2
-alpha = 0.15  # Increased smoothing (lower = smoother)
+alpha = 0.15  
 
-# Kalman filter for gaze smoothing
 class KalmanFilter:
     def __init__(self, process_variance=1e-3, measurement_variance=1e-1):
         self.process_variance = process_variance
@@ -63,13 +62,11 @@ class KalmanFilter:
         self.error_cov_y = 1.0
     
     def update(self, measurement_x, measurement_y):
-        # Prediction
         prediction_x = self.estimated_x
         prediction_y = self.estimated_y
         error_cov_x = self.error_cov_x + self.process_variance
         error_cov_y = self.error_cov_y + self.process_variance
         
-        # Update
         kalman_gain_x = error_cov_x / (error_cov_x + self.measurement_variance)
         kalman_gain_y = error_cov_y / (error_cov_y + self.measurement_variance)
         
@@ -88,21 +85,20 @@ cv2.namedWindow('Gaze Pointer', cv2.WINDOW_NORMAL)
 cv2.setWindowProperty('Gaze Pointer', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 cv2.setWindowProperty('Gaze Pointer', cv2.WND_PROP_TOPMOST, 1)
 
-# Auto-calibration at startup
 calibration_active = True
 calibration_start_time = None
-calibration_duration = 5.0  # 5 seconds
-calibration_samples = []  # Store gaze_world samples during calibration
-gaze_vector_offset = np.array([0.0, 0.0, 0.0])  # Offset to apply after calibration
+calibration_duration = 5.0 
+calibration_samples = [] 
+gaze_vector_offset = np.array([0.0, 0.0, 0.0])  
 
 def estimate_head_pose(landmarks, frame_w, frame_h):
     model_points = np.array([
-        (0.0, 0.0, 0.0),             # Nose tip
-        (0.0, -330.0, -65.0),        # Chin
-        (-225.0, 170.0, -135.0),     # Left eye corner
-        (225.0, 170.0, -135.0),      # Right eye corner
-        (-150.0, -150.0, -125.0),    # Left mouth corner
-        (150.0, -150.0, -125.0)      # Right mouth corner
+        (0.0, 0.0, 0.0),            
+        (0.0, -330.0, -65.0),      
+        (-225.0, 170.0, -135.0),   
+        (225.0, 170.0, -135.0),    
+        (-150.0, -150.0, -125.0),   
+        (150.0, -150.0, -125.0)     
     ], dtype=np.float64)
     
     image_points = np.array([
@@ -223,11 +219,9 @@ calibration_samples = []
 offset_x, offset_y = 0, 0
 sensitivity_multiplier = 1.0
 
-# WebSocket server
 gaze_data_clients = set()
 websocket_server_ready = False
 
-# Latest gaze data to send
 latest_gaze_data = {
     "x": 0.5,
     "y": 0.5,
@@ -292,7 +286,6 @@ def start_websocket_server():
     except Exception as e:
         print(f"[!] Failed to start WebSocket server: {e}")
 
-# Start WebSocket server in background thread
 ws_thread = Thread(target=start_websocket_server, daemon=True)
 ws_thread.start()
 
