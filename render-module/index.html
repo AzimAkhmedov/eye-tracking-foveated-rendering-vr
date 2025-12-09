@@ -157,6 +157,7 @@
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 
     <script>
       console.log("Starting Foveated Renderer for Any Scene...");
@@ -189,6 +190,9 @@
       let skippedMeshes = 0;
       let totalTriangles = 0;
       let renderedTriangles = 0;
+      let gpuMemoryUsed = 0;
+      let drawCalls = 0;
+      let gpuTimeMs = 0;
 
       const debugPanel = document.getElementById("debugPanel");
       const gazeIndicator = document.getElementById("gazeIndicator");
@@ -210,58 +214,65 @@
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       document.body.appendChild(renderer.domElement);
 
+      // Освещение
       const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
       scene.add(ambientLight);
       const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
       dirLight.position.set(5, 10, 5);
       scene.add(dirLight);
 
+      // Хранилище для всех объектов сцены
       const sceneObjects = [];
       let loadedModel = null;
 
+      // Создаем тестовую сцену по умолчанию
       function createTestScene() {
         console.log("Creating test scene...");
-
+        
+        // Группа для тестовой сцены
         const testGroup = new THREE.Group();
-
+        
+        // Центральная сфера
         const sphereGeo = new THREE.SphereGeometry(1, 32, 32);
-        const sphereMat = new THREE.MeshStandardMaterial({
+        const sphereMat = new THREE.MeshStandardMaterial({ 
           color: 0xff6b6b,
           metalness: 0.5,
-          roughness: 0.5,
+          roughness: 0.5
         });
         const sphere = new THREE.Mesh(sphereGeo, sphereMat);
         sphere.userData.triangleCount = sphereGeo.attributes.position.count / 3;
         testGroup.add(sphere);
         sceneObjects.push(sphere);
 
+        // Кольцо из кубов
         const boxGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
         for (let i = 0; i < 12; i++) {
           const angle = (i / 12) * Math.PI * 2;
           const radius = 3;
-          const boxMat = new THREE.MeshStandardMaterial({
+          const boxMat = new THREE.MeshStandardMaterial({ 
             color: new THREE.Color().setHSL(i / 12, 1, 0.6),
             metalness: 0.3,
-            roughness: 0.7,
+            roughness: 0.7
           });
           const box = new THREE.Mesh(boxGeo, boxMat);
           box.position.x = Math.cos(angle) * radius;
           box.position.z = Math.sin(angle) * radius;
           box.position.y = Math.sin(i * 0.5) * 0.5;
           box.rotation.y = angle;
-          box.userData.triangleCount = 12;
+          box.userData.triangleCount = 12; // Куб = 12 треугольников
           testGroup.add(box);
           sceneObjects.push(box);
         }
 
+        // Внешнее кольцо из конусов
         const coneGeo = new THREE.ConeGeometry(0.3, 0.8, 8);
         for (let i = 0; i < 20; i++) {
           const angle = (i / 20) * Math.PI * 2;
           const radius = 5;
-          const coneMat = new THREE.MeshStandardMaterial({
+          const coneMat = new THREE.MeshStandardMaterial({ 
             color: new THREE.Color().setHSL(i / 20, 0.8, 0.5),
             metalness: 0.2,
-            roughness: 0.8,
+            roughness: 0.8
           });
           const cone = new THREE.Mesh(coneGeo, coneMat);
           cone.position.x = Math.cos(angle) * radius;
@@ -272,12 +283,13 @@
           sceneObjects.push(cone);
         }
 
+        // Пол
         const floorGeo = new THREE.PlaneGeometry(20, 20, 10, 10);
-        const floorMat = new THREE.MeshStandardMaterial({
+        const floorMat = new THREE.MeshStandardMaterial({ 
           color: 0x2c3e50,
           metalness: 0.1,
           roughness: 0.9,
-          side: THREE.DoubleSide,
+          side: THREE.DoubleSide
         });
         const floor = new THREE.Mesh(floorGeo, floorMat);
         floor.rotation.x = -Math.PI / 2;
@@ -288,45 +300,47 @@
 
         scene.add(testGroup);
         loadedModel = testGroup;
-
+        
         totalMeshes = sceneObjects.length;
-        totalTriangles = sceneObjects.reduce(
-          (sum, obj) => sum + (obj.userData.triangleCount || 0),
-          0
+        totalTriangles = sceneObjects.reduce((sum, obj) => 
+          sum + (obj.userData.triangleCount || 0), 0
         );
-
-        console.log(
-          `Test scene created: ${totalMeshes} meshes, ${totalTriangles} triangles`
-        );
+        
+        console.log(`Test scene created: ${totalMeshes} meshes, ${totalTriangles} triangles`);
       }
 
       createTestScene();
 
+      // Функция для получения экранной позиции объекта
       function getScreenPosition(object) {
         const vector = new THREE.Vector3();
         object.getWorldPosition(vector);
         vector.project(camera);
-
+        
         return {
           x: (vector.x + 1) / 2,
           y: (-vector.y + 1) / 2,
-          z: vector.z,
+          z: vector.z
         };
       }
 
+      // Функция для вычисления расстояния от объекта до точки взгляда
       function getDistanceToGaze(object) {
         const pos = getScreenPosition(object);
-
+        
+        // Если объект за камерой, возвращаем большое значение
         if (pos.z > 1) return 999;
-
+        
         const dx = pos.x - gazeData.x;
         const dy = pos.y - gazeData.y;
         return Math.sqrt(dx * dx + dy * dy);
       }
 
+      // Основная функция фовеального рендеринга
       function updateFoveatedRendering() {
         if (!foveatedEnabled) {
-          sceneObjects.forEach((obj) => {
+          // Без оптимизации - показываем всё
+          sceneObjects.forEach(obj => {
             obj.visible = true;
             if (obj.material) {
               obj.material.wireframe = false;
@@ -342,10 +356,11 @@
         skippedMeshes = 0;
         renderedTriangles = 0;
 
-        sceneObjects.forEach((obj) => {
+        sceneObjects.forEach(obj => {
           const dist = getDistanceToGaze(obj);
-
+          
           if (dist < RADIUS_FOVEA) {
+            // ФОВЕА: полное качество
             obj.visible = true;
             if (obj.material) {
               obj.material.wireframe = false;
@@ -354,7 +369,9 @@
             }
             renderedMeshes++;
             renderedTriangles += obj.userData.triangleCount || 0;
+            
           } else if (dist < RADIUS_PARAFOVEA) {
+            // ПАРАФОВЕА: вайрфрейм или упрощенный рендер
             obj.visible = true;
             if (obj.material) {
               obj.material.wireframe = true;
@@ -362,8 +379,10 @@
               obj.material.transparent = true;
             }
             renderedMeshes++;
-            renderedTriangles += (obj.userData.triangleCount || 0) * 0.1;
+            renderedTriangles += (obj.userData.triangleCount || 0) * 0.1; // Вайрфрейм ~10% нагрузки
+            
           } else {
+            // ПЕРИФЕРИЯ: не рендерим совсем
             obj.visible = false;
             skippedMeshes++;
           }
@@ -379,6 +398,17 @@
         const sum = perfSamples.reduce((a, b) => a + b, 0);
         const avg = sum / perfSamples.length;
         fps = 1000 / (avg || 16.67);
+        
+        // GPU метрики из renderer.info
+        const info = renderer.info;
+        drawCalls = info.render.calls;
+        
+        // Приблизительная оценка нагрузки на GPU
+        // Базируется на количестве треугольников и draw calls
+        gpuTimeMs = (renderedTriangles / 1000) * 0.01 + drawCalls * 0.05;
+        
+        // Оценка использования GPU памяти (MB)
+        gpuMemoryUsed = (info.memory.geometries * 0.5 + info.memory.textures * 2);
       }
 
       function updateDebugInfo() {
@@ -386,28 +416,19 @@
         const conf = gazeData.confidence;
 
         const avgFrame = perfSamples.length
-          ? (
-              perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length
-            ).toFixed(2)
+          ? (perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length).toFixed(2)
           : "0";
 
         const fpsPercent = Math.min((fps / 60) * 100, 100);
-        const renderPercent =
-          totalMeshes > 0 ? (renderedMeshes / totalMeshes) * 100 : 0;
-        const trianglePercent =
-          totalTriangles > 0 ? (renderedTriangles / totalTriangles) * 100 : 0;
-        const optimization =
-          totalMeshes > 0
-            ? ((skippedMeshes / totalMeshes) * 100).toFixed(1)
-            : "0";
+        const renderPercent = totalMeshes > 0 ? (renderedMeshes / totalMeshes) * 100 : 0;
+        const trianglePercent = totalTriangles > 0 ? (renderedTriangles / totalTriangles) * 100 : 0;
+        const optimization = totalMeshes > 0 ? ((skippedMeshes / totalMeshes) * 100).toFixed(1) : "0";
 
         debugPanel.innerHTML = `
         <div class="section-title">🔌 CONNECTION</div>
         <div class="metric-row">
           <span class="metric-label">WebSocket:</span>
-          <span class="metric-value ${
-            connected ? "status-connected" : "status-disconnected"
-          }">
+          <span class="metric-value ${connected ? "status-connected" : "status-disconnected"}">
             ${connected ? "✓ Connected" : "✗ Disconnected"}
           </span>
         </div>
@@ -415,9 +436,7 @@
         <div class="section-title">👁️ GAZE</div>
         <div class="metric-row">
           <span class="metric-label">Position:</span>
-          <span class="metric-value">(${gazeData.x.toFixed(
-            3
-          )}, ${gazeData.y.toFixed(3)})</span>
+          <span class="metric-value">(${gazeData.x.toFixed(3)}, ${gazeData.y.toFixed(3)})</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Confidence:</span>
@@ -437,25 +456,46 @@
         </div>
         <div class="metric-row">
           <span class="metric-label">Frame Time:</span>
-          <span class="metric-value">${frameTime.toFixed(
-            2
-          )} ms (avg: ${avgFrame})</span>
+          <span class="metric-value">${frameTime.toFixed(2)} ms (avg: ${avgFrame})</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Draw Calls:</span>
+          <span class="metric-value">${drawCalls}</span>
+        </div>
+        
+        <div class="section-title">🖥️ GPU LOAD</div>
+        <div class="metric-row">
+          <span class="metric-label">GPU Time:</span>
+          <span class="metric-value">${gpuTimeMs.toFixed(2)} ms</span>
+        </div>
+        <div class="performance-bar">
+          <div class="performance-bar-fill" style="width: ${Math.min((gpuTimeMs / 16.67) * 100, 100)}%"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">GPU Utilization:</span>
+          <span class="metric-value">${Math.min(((gpuTimeMs / 16.67) * 100), 100).toFixed(1)}%</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">VRAM Usage:</span>
+          <span class="metric-value">${gpuMemoryUsed.toFixed(1)} MB</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Geometries:</span>
+          <span class="metric-value">${renderer.info.memory.geometries}</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Textures:</span>
+          <span class="metric-value">${renderer.info.memory.textures}</span>
         </div>
         
         <div class="section-title">🎨 RENDERING MODE</div>
         <div class="metric-row">
           <span class="metric-label">Current Mode:</span>
-          <span class="metric-value">${
-            foveatedEnabled ? "🎯 FOVEATED" : "👁️ FULL SCENE"
-          }</span>
+          <span class="metric-value">${foveatedEnabled ? "🎯 FOVEATED" : "👁️ FULL SCENE"}</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Status:</span>
-          <span class="metric-value">${
-            foveatedEnabled
-              ? "Optimizing based on gaze"
-              : "Rendering everything"
-          }</span>
+          <span class="metric-value">${foveatedEnabled ? "Optimizing based on gaze" : "Rendering everything"}</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Meshes:</span>
@@ -466,18 +506,14 @@
         </div>
         <div class="metric-row">
           <span class="metric-label">Triangles:</span>
-          <span class="metric-value">${Math.round(
-            renderedTriangles
-          ).toLocaleString()} / ${totalTriangles.toLocaleString()}</span>
+          <span class="metric-value">${Math.round(renderedTriangles).toLocaleString()} / ${totalTriangles.toLocaleString()}</span>
         </div>
         <div class="performance-bar">
           <div class="performance-bar-fill" style="width: ${trianglePercent}%"></div>
         </div>
         <div class="metric-row">
           <span class="metric-label">Optimization:</span>
-          <span class="metric-value optimization-gain">${
-            foveatedEnabled ? optimization + "% saved" : "0% (Full render)"
-          }</span>
+          <span class="metric-value optimization-gain">${foveatedEnabled ? optimization + "% saved" : "0% (Full render)"}</span>
         </div>
         
         <div class="section-title">⌨️ CONTROLS</div>
@@ -528,10 +564,7 @@
 
           ws.onclose = (event) => {
             gazeData.connected = false;
-            if (
-              event.code !== 1000 &&
-              reconnectAttempts < maxReconnectAttempts
-            ) {
+            if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
               reconnectAttempts++;
               const delay = Math.min(2000 * reconnectAttempts, 10000);
               setTimeout(connectWebSocket, delay);
@@ -543,6 +576,7 @@
         }
       }
 
+      // Управление мышью
       let mouseDown = false;
       let mouseX = 0;
       let mouseY = 0;
@@ -589,27 +623,97 @@
         }
       });
 
+      // Загрузка моделей
+      const gltfLoader = new THREE.GLTFLoader();
+      
       document.getElementById("modelInput").addEventListener("change", (e) => {
-        console.log("File upload not implemented in this demo");
-        console.log(
-          "In production, use GLTFLoader, OBJLoader, or FBXLoader here"
-        );
-        alert(
-          "Model loading would be implemented here with appropriate loaders.\n\nFor now, enjoy the test scene!"
-        );
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        console.log("Loading model:", file.name);
+        
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const arrayBuffer = event.target.result;
+          
+          // Очищаем старую сцену
+          if (loadedModel) {
+            scene.remove(loadedModel);
+            sceneObjects.length = 0;
+          }
+          
+          // Загружаем новую модель
+          gltfLoader.parse(arrayBuffer, '', (gltf) => {
+            console.log("Model loaded successfully!");
+            loadedModel = gltf.scene;
+            scene.add(loadedModel);
+            
+            // Центрируем и масштабируем модель
+            const box = new THREE.Box3().setFromObject(loadedModel);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = 5 / maxDim;
+            loadedModel.scale.setScalar(scale);
+            
+            loadedModel.position.x = -center.x * scale;
+            loadedModel.position.y = -center.y * scale;
+            loadedModel.position.z = -center.z * scale;
+            
+            // Собираем все меши
+            loadedModel.traverse((child) => {
+              if (child.isMesh) {
+                sceneObjects.push(child);
+                
+                // Подсчитываем треугольники
+                if (child.geometry && child.geometry.attributes.position) {
+                  child.userData.triangleCount = child.geometry.attributes.position.count / 3;
+                }
+                
+                // Убеждаемся что материалы корректны
+                if (child.material) {
+                  if (Array.isArray(child.material)) {
+                    child.material.forEach(mat => {
+                      mat.side = THREE.DoubleSide;
+                    });
+                  } else {
+                    child.material.side = THREE.DoubleSide;
+                  }
+                }
+              }
+            });
+            
+            totalMeshes = sceneObjects.length;
+            totalTriangles = sceneObjects.reduce((sum, obj) => 
+              sum + (obj.userData.triangleCount || 0), 0
+            );
+            
+            console.log(`Loaded: ${totalMeshes} meshes, ${totalTriangles.toFixed(0)} triangles`);
+            
+            // Настраиваем камеру
+            camera.position.set(0, 2, 8);
+            camera.lookAt(0, 0, 0);
+            
+          }, (error) => {
+            console.error("Error loading model:", error);
+            alert("Error loading model. Make sure it's a valid GLTF/GLB file.");
+          });
+        };
+        
+        reader.readAsArrayBuffer(file);
       });
 
+      // Кнопка переключения режима рендеринга
       const toggleButton = document.getElementById("toggleButton");
-
+      
       toggleButton.addEventListener("click", () => {
         foveatedEnabled = !foveatedEnabled;
-
+        
         if (foveatedEnabled) {
           toggleButton.textContent = "🎯 FOVEATED ON";
           toggleButton.classList.add("active");
-          console.log(
-            "✓ Foveated rendering ENABLED - Objects outside gaze will be culled"
-          );
+          console.log("✓ Foveated rendering ENABLED - Objects outside gaze will be culled");
         } else {
           toggleButton.textContent = "👁️ FULL RENDER";
           toggleButton.classList.remove("active");
